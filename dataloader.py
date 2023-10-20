@@ -16,7 +16,7 @@ def random_crop(im_h, im_w, crop_h, crop_w):
         return i, j, crop_h, crop_w
 
 class SHHA_loader(data.Dataset):
-    def __init__(self, data_path, split, crop_size=512):
+    def __init__(self, data_path, split, output_size=256):
         self.data_path = os.path.join(data_path, split + "_data")
         self.img_path = os.path.join(self.data_path, "images")
         self.gt_path = os.path.join(self.data_path, "ground_truth")
@@ -24,12 +24,21 @@ class SHHA_loader(data.Dataset):
         self.file_names = [filename for filename in os.listdir(self.img_path) \
                            if os.path.isfile(os.path.join(self.img_path, filename))]
         
-        self.crop_size = crop_size
+        self.output_size = output_size
+        self.split = split
+        assert self.split in ["train", "test"]
 
-        self.trans = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
+        if self.split == "train":
+            self.trans = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                ])
+        else:
+            self.trans = transforms.Compose([
+                    transforms.Resize((self.output_size, self.output_size)),
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                ])
     
     def __getitem__(self, index):
         image_name = self.file_names[index]
@@ -37,18 +46,36 @@ class SHHA_loader(data.Dataset):
         image = Image.open(os.path.join(self.img_path, image_name)).convert('RGB')
         gt = sio.loadmat(os.path.join(self.gt_path, gt_name))
         gt = gt["image_info"][0, 0][0, 0][0] - 1
-        return self.train_transform(image, gt)
+        if self.split == "train":
+            return self.transform_RC(image, gt)
+        else:
+            return self.transform_resize(image, gt)
 
     def __len__(self):
         return len(self.file_names)
+    
+    def transform_resize(self, img, keypoints):
+        wd, ht = img.size
+        keypoints[:, 0] *= self.output_size / wd
+        keypoints[:, 1] *= self.output_size / ht
+        return self.trans(img), torch.from_numpy(keypoints.copy()).float()
             
-    def train_transform(self, img, keypoints):
+    def transform_RC(self, img, keypoints):
         """random crop image patch and find people in it"""
         wd, ht = img.size
         st_size = min(wd, ht)
-        assert st_size >= self.crop_size
-        assert len(keypoints) > 0
-        i, j, h, w = random_crop(ht, wd, self.crop_size, self.crop_size)
+
+        min_factor = max(self.output_size / st_size, 0.5)
+        if min_factor > 1.5:
+            factor = min_factor
+        else:
+            factor = np.random.uniform(low=min_factor, high=1.5)
+
+        img = F.resize(img, (int(ht * factor), int(wd * factor)))
+        keypoints = keypoints * factor
+        wd, ht = img.size
+
+        i, j, h, w = random_crop(ht, wd, self.output_size, self.output_size)
         img = F.crop(img, i, j, h, w)
 
         mask = (keypoints[:, 0] >= j) & (keypoints[:, 0] < j + w) & \
